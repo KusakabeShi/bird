@@ -70,6 +70,7 @@ struct bgp_af_desc {
   void (*decode_nlri)(struct bgp_parse_state *s, byte *pos, uint len, rta *a);
   void (*update_next_hop)(struct bgp_export_state *s, eattr *nh, ea_list **to);
   uint (*encode_next_hop)(struct bgp_write_state *s, eattr *nh, byte *buf, uint size);
+  uint (*encode_next_hop_ll)(struct bgp_write_state *s, eattr *nh, byte *buf, uint size);
   void (*decode_next_hop)(struct bgp_parse_state *s, byte *pos, uint len, rta *a);
 };
 
@@ -668,6 +669,7 @@ void bgp_update_next_hop(struct bgp_export_state *s, eattr *a, ea_list **to);
 #define BA_ORIGIN		0x01	/* RFC 4271 */		/* WM */
 #define BA_AS_PATH		0x02				/* WM */
 #define BA_NEXT_HOP		0x03				/* WM */
+#define BA_NEXT_HOP_LL	0x13				/* WM */
 #define BA_MULTI_EXIT_DISC	0x04				/* ON */
 #define BA_LOCAL_PREF		0x05				/* WD */
 #define BA_ATOMIC_AGGR		0x06				/* WD */

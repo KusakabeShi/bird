@@ -496,6 +496,7 @@ bgp_encode_next_hop(struct bgp_write_state *s, eattr *a, byte *buf, uint size)
       return -1;
 
     bgp_put_attr_hdr3(buf, BA_NEXT_HOP, a->flags, 4);
+    bgp_put_attr_hdr3(buf, BA_NEXT_HOP_LL, a->flags, 4);
     put_ip4(buf+3, ipa_to_ip4(*addr));
 
     return 3+4;
@@ -505,6 +506,11 @@ bgp_encode_next_hop(struct bgp_write_state *s, eattr *a, byte *buf, uint size)
     s->mp_next_hop = a;
     return 0;
   }
+}
+
+static int
+bgp_encode_next_hop_ll(struct bgp_write_state *s, eattr *a, byte *buf, uint size){
+  return bgp_encode_next_hop(s, a, buf, size);
 }
 
 static void
@@ -1018,6 +1024,14 @@ static const struct bgp_attr_desc bgp_attr_table[] = {
     .type = EAF_TYPE_IP_ADDRESS,
     .flags = BAF_TRANSITIVE,
     .encode = bgp_encode_next_hop,
+    .decode = bgp_decode_next_hop,
+    .format = bgp_format_next_hop,
+  },
+  [BA_NEXT_HOP_LL] = {
+    .name = "next_hop_ll",
+    .type = EAF_TYPE_IP_ADDRESS,
+    .flags = BAF_TRANSITIVE,
+    .encode = bgp_encode_next_hop_ll,
     .decode = bgp_decode_next_hop,
     .format = bgp_format_next_hop,
   },

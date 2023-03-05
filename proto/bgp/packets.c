@@ -1184,6 +1184,7 @@ bgp_update_next_hop_ip(struct bgp_export_state *s, eattr *a, ea_list **to)
       rta *ra = s->route->attrs;
       ip_addr nh[1] = { ra->nh.gw };
       bgp_set_attr_data(to, s->pool, BA_NEXT_HOP, 0, nh, 16);
+      bgp_set_attr_data(to, s->pool, BA_NEXT_HOP_LL, 0, nh, 16);
 
       if (s->mpls)
       {
@@ -1198,7 +1199,10 @@ bgp_update_next_hop_ip(struct bgp_export_state *s, eattr *a, ea_list **to)
     else
     {
       ip_addr nh[2] = { s->channel->next_hop_addr, s->channel->link_addr };
+      ip_addr nh_ll[1] = { ipa_is_link_local(s->channel->next_hop_addr)? s->channel->next_hop_addr : s->channel->link_addr };
       bgp_set_attr_data(to, s->pool, BA_NEXT_HOP, 0, nh, ipa_nonzero(nh[1]) ? 32 : 16);
+      bgp_set_attr_data(to, s->pool, BA_NEXT_HOP_LL, 0, nh_ll, 16);
+      
       s->local_next_hop = 1;
 
       /* TODO: Use local MPLS assigned label */
@@ -1269,17 +1273,60 @@ bgp_encode_next_hop_ip(struct bgp_write_state *s, eattr *a, byte *buf, uint size
   return len;
 }
 
+static uint
+bgp_encode_next_hop_ip_ll(struct bgp_write_state *s, eattr *a, byte *buf, uint size UNUSED)
+{
+  /* This function is used only for MP-BGP, see bgp_encode_next_hop() for IPv4 BGP */
+  ip_addr *nh = (void *) a->u.ptr->data;
+  uint len = a->u.ptr->length;
+
+  ASSERT((len == 16) || (len == 32));
+
+  /*
+   * Both IPv4 and IPv6 next hops can be used (with ext_next_hop enabled). This
+   * is specified in RFC 5549 for IPv4 and in RFC 4798 for IPv6. The difference
+   * is that IPv4 address is directly encoded with IPv4 NLRI, but as IPv4-mapped
+   * IPv6 address with IPv6 NLRI.
+   */
+
+  if (bgp_channel_is_ipv4(s->channel) && ipa_is_ip4(nh[0]))
+  {
+    put_ip4(buf, ipa_to_ip4(nh[0]));
+    return 4;
+  }
+  if (ipa_is_link_local(nh[0])){
+    put_ip6(buf, ipa_to_ip6(nh[0]));
+  }
+  
+
+  if (len == 32){
+    if (ipa_is_link_local(nh[0])){
+      put_ip6(buf, ipa_to_ip6(nh[0]));
+    } else if (ipa_is_link_local(nh[1])){
+      put_ip6(buf, ipa_to_ip6(nh[1]));
+    }
+    put_ip6(buf+16, ipa_to_ip6(nh[1]));
+  }
+
+  return len;
+}
+
+
 static void
 bgp_decode_next_hop_ip(struct bgp_parse_state *s, byte *data, uint len, rta *a)
 {
   struct bgp_channel *c = s->channel;
   struct adata *ad = lp_alloc_adata(s->pool, 32);
   ip_addr *nh = (void *) ad->data;
+  struct adata *ad_ll = lp_alloc_adata(s->pool, 32);
+  ip_addr *nh_ll = (void *) ad_ll->data;
+  nh_ll[1] = IPA_NONE;
 
   if (len == 4)
   {
     nh[0] = ipa_from_ip4(get_ip4(data));
     nh[1] = IPA_NONE;
+    nh_ll[0] = IPA_NONE;
   }
   else if (len == 16)
   {
@@ -1288,6 +1335,11 @@ bgp_decode_next_hop_ip(struct bgp_parse_state *s, byte *data, uint len, rta *a)
 
     if (ipa_is_link_local(nh[0]))
     { nh[1] = nh[0]; nh[0] = IPA_NONE; }
+
+    nh_ll[0] = ipa_from_ip6(get_ip6(data));
+    if (!ipa_is_link_local(nh_ll[0]))
+    { nh[0] = IPA_NONE; }
+
   }
   else if (len == 32)
   {
@@ -1296,6 +1348,11 @@ bgp_decode_next_hop_ip(struct bgp_parse_state *s, byte *data, uint len, rta *a)
 
     if (ipa_is_link_local(nh[0]))
     { nh[1] = nh[0]; nh[0] = IPA_NONE; }
+
+    nh_ll[0] = ipa_from_ip6(get_ip6(data));
+    nh_ll[1] = ipa_from_ip6(get_ip6(data+16));
+    if (!ipa_is_link_local(nh_ll[0]))
+    { nh_ll[0] = nh_ll[1]; nh_ll[1] = IPA_NONE; }
 
     if (ipa_is_ip4(nh[0]) || !ipa_is_link_local(nh[1]))
       nh[1] = IPA_NONE;
@@ -1312,6 +1369,7 @@ bgp_decode_next_hop_ip(struct bgp_parse_state *s, byte *data, uint len, rta *a)
   // XXXX validate next hop
 
   bgp_set_attr_ptr(&(a->eattrs), s->pool, BA_NEXT_HOP, 0, ad);
+  bgp_set_attr_ptr(&(a->eattrs), s->pool, BA_NEXT_HOP_LL, 0, ad_ll);
   bgp_apply_next_hop(s, a, nh[0], nh[1]);
 }
 
@@ -1393,6 +1451,7 @@ bgp_decode_next_hop_vpn(struct bgp_parse_state *s, byte *data, uint len, rta *a)
   // XXXX validate next hop
 
   bgp_set_attr_ptr(&(a->eattrs), s->pool, BA_NEXT_HOP, 0, ad);
+  bgp_set_attr_ptr(&(a->eattrs), s->pool, BA_NEXT_HOP_LL, 0, ad);
   bgp_apply_next_hop(s, a, nh[0], nh[1]);
 }
 
@@ -1420,8 +1479,10 @@ static void
 bgp_update_next_hop_none(struct bgp_export_state *s, eattr *a, ea_list **to)
 {
   /* NEXT_HOP shall not pass */
-  if (a)
+  if (a){
     bgp_unset_attr(to, s->pool, BA_NEXT_HOP);
+    bgp_unset_attr(to, s->pool, BA_NEXT_HOP_LL);
+  }
 }
 
 
@@ -2087,6 +2148,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_ip4,
     .decode_nlri = bgp_decode_nlri_ip4,
     .encode_next_hop = bgp_encode_next_hop_ip,
+    .encode_next_hop_ll = bgp_encode_next_hop_ip,
     .decode_next_hop = bgp_decode_next_hop_ip,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2097,6 +2159,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_ip4,
     .decode_nlri = bgp_decode_nlri_ip4,
     .encode_next_hop = bgp_encode_next_hop_ip,
+    .encode_next_hop_ll = bgp_encode_next_hop_ip,
     .decode_next_hop = bgp_decode_next_hop_ip,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2108,6 +2171,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_ip4,
     .decode_nlri = bgp_decode_nlri_ip4,
     .encode_next_hop = bgp_encode_next_hop_ip,
+    .encode_next_hop_ll = bgp_encode_next_hop_ip,
     .decode_next_hop = bgp_decode_next_hop_ip,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2118,6 +2182,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_ip6,
     .decode_nlri = bgp_decode_nlri_ip6,
     .encode_next_hop = bgp_encode_next_hop_ip,
+    .encode_next_hop_ll = bgp_encode_next_hop_ip_ll,
     .decode_next_hop = bgp_decode_next_hop_ip,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2128,6 +2193,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_ip6,
     .decode_nlri = bgp_decode_nlri_ip6,
     .encode_next_hop = bgp_encode_next_hop_ip,
+    .encode_next_hop_ll = bgp_encode_next_hop_ip,
     .decode_next_hop = bgp_decode_next_hop_ip,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2139,6 +2205,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_ip6,
     .decode_nlri = bgp_decode_nlri_ip6,
     .encode_next_hop = bgp_encode_next_hop_ip,
+    .encode_next_hop_ll = bgp_encode_next_hop_ip,
     .decode_next_hop = bgp_decode_next_hop_ip,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2150,6 +2217,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_vpn4,
     .decode_nlri = bgp_decode_nlri_vpn4,
     .encode_next_hop = bgp_encode_next_hop_vpn,
+    .encode_next_hop_ll = bgp_encode_next_hop_vpn,
     .decode_next_hop = bgp_decode_next_hop_vpn,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2161,6 +2229,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_vpn6,
     .decode_nlri = bgp_decode_nlri_vpn6,
     .encode_next_hop = bgp_encode_next_hop_vpn,
+    .encode_next_hop_ll = bgp_encode_next_hop_vpn,
     .decode_next_hop = bgp_decode_next_hop_vpn,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2171,6 +2240,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_vpn4,
     .decode_nlri = bgp_decode_nlri_vpn4,
     .encode_next_hop = bgp_encode_next_hop_vpn,
+    .encode_next_hop_ll = bgp_encode_next_hop_vpn,
     .decode_next_hop = bgp_decode_next_hop_vpn,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2181,6 +2251,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_vpn6,
     .decode_nlri = bgp_decode_nlri_vpn6,
     .encode_next_hop = bgp_encode_next_hop_vpn,
+    .encode_next_hop_ll = bgp_encode_next_hop_vpn,
     .decode_next_hop = bgp_decode_next_hop_vpn,
     .update_next_hop = bgp_update_next_hop_ip,
   },
@@ -2192,6 +2263,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_flow4,
     .decode_nlri = bgp_decode_nlri_flow4,
     .encode_next_hop = bgp_encode_next_hop_none,
+    .encode_next_hop_ll = bgp_encode_next_hop_none,
     .decode_next_hop = bgp_decode_next_hop_none,
     .update_next_hop = bgp_update_next_hop_none,
   },
@@ -2203,6 +2275,7 @@ static const struct bgp_af_desc bgp_af_table[] = {
     .encode_nlri = bgp_encode_nlri_flow6,
     .decode_nlri = bgp_decode_nlri_flow6,
     .encode_next_hop = bgp_encode_next_hop_none,
+    .encode_next_hop_ll = bgp_encode_next_hop_none,
     .decode_next_hop = bgp_decode_next_hop_none,
     .update_next_hop = bgp_update_next_hop_none,
   },
@@ -2229,6 +2302,12 @@ static inline uint
 bgp_encode_next_hop(struct bgp_write_state *s, eattr *nh, byte *buf)
 {
   return s->channel->desc->encode_next_hop(s, nh, buf, 255);
+}
+
+static inline uint
+bgp_encode_next_hop_ll(struct bgp_write_state *s, eattr *nh, byte *buf)
+{
+  return s->channel->desc->encode_next_hop_ll(s, nh, buf, 255);
 }
 
 void
