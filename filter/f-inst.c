@@ -884,7 +884,10 @@
 	  RESULT_(T_BYTESTRING, ad, e->u.ptr);
 	break;
       case EAF_TYPE_IP_ADDRESS:
-	RESULT_(T_IP, ip, *((ip_addr *) e->u.ptr->data));
+	if (da.bit == 2)
+	  RESULT_(T_IP, ip, (e->u.ptr->length >= 32) ? ((ip_addr *) e->u.ptr->data)[1] : IPA_NONE);
+	else
+	  RESULT_(T_IP, ip, *((ip_addr *) e->u.ptr->data));
 	break;
       case EAF_TYPE_AS_PATH:
 	RESULT_(T_PATH, ad, e->u.ptr);
@@ -942,11 +945,38 @@
 	break;
 
       case EAF_TYPE_IP_ADDRESS:;
-	int len = sizeof(ip_addr);
-	struct adata *ad = lp_alloc(fs->pool, sizeof(struct adata) + len);
-	ad->length = len;
-	(* (ip_addr *) ad->data) = v1.val.ip;
-	l->attrs[0].u.ptr = ad;
+	if (da.bit == 0)
+	{
+	  /* Origional BGP_NEXT_HOP */
+	  int len = sizeof(ip_addr);
+	  struct adata *ad = lp_alloc(fs->pool, sizeof(struct adata) + len);
+	  ad->length = len;
+	  (* (ip_addr *) ad->data) = v1.val.ip;
+	  l->attrs[0].u.ptr = ad;
+	}
+	else
+	{
+	  /* BGP_NEXT_HOP_GLOBAL and BGP_NEXT_HOP_LL, Partial update of NEXT_HOP: preserve the other slot */
+	  eattr *old = ea_find(*fs->eattrs, da.ea_code);
+	  ip_addr nh[2] = { IPA_NONE, IPA_NONE };
+	  if (old && old->u.ptr)
+	  {
+	    nh[0] = *(ip_addr *) old->u.ptr->data;
+	    if (old->u.ptr->length >= 32)
+	      nh[1] = ((ip_addr *) old->u.ptr->data)[1];
+	  }
+
+	  if (da.bit == 1)
+	    nh[0] = v1.val.ip;
+	  else
+	    nh[1] = v1.val.ip;
+
+	  int len = ipa_zero(nh[1]) ? sizeof(ip_addr) : 2 * sizeof(ip_addr);
+	  struct adata *ad = lp_alloc(fs->pool, sizeof(struct adata) + len);
+	  ad->length = len;
+	  memcpy(ad->data, nh, len);
+	  l->attrs[0].u.ptr = ad;
+	}
 	break;
 
       case EAF_TYPE_OPAQUE:
